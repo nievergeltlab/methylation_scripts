@@ -1,0 +1,55 @@
+#Association analysis with CpGassoc package
+library('CpGassoc')
+library(minfi)
+
+
+#get number of rows in file (reads file faster)
+nr <- as.numeric(system('wc -l cleaned_v3a.methylation | awk \'{print $1}\' ',intern=T))
+
+#get list of numeric column classes (reads file faster)
+dat_temp <- read.table("cleaned_v3a.methylation", header=T,nrows=50)
+classes_to_use <- sapply(dat_temp , class)
+
+#read file
+dat <- read.table("cleaned_v3a.methylation", header=T,nrows=nr,colClasses=classes_to_use)
+
+
+#make a dataframe of subject names that goes in the order they appear in the file
+dat_order <- as.data.frame(names(dat))
+
+#name the subjects the same as found in the matching column in the batch file
+names(dat_order) <- c('methylome_id_fixed')
+
+#establish a note of what the ordering is
+dat_order$order <- c(1:(dim(dat)[2]))
+
+batch <- read.csv("data_analysis/demo2_wholedata_methylation_x3i.csv", header=T,na.strings=c("NA","#N/A","N/A"))
+
+#merge batch data with subject name order data
+covariates_ordered0 <- merge(batch,dat_order,by='methylome_id_fixed')
+
+
+#sort the data by order so the phenotype now lines up
+covariates_ordered <- covariates_ordered0[order(covariates_ordered0$order),]
+
+#read in studymax covariate data, to get the studymax ids (if doing studymax)
+covars_studymax <- read.csv('data_analysis/demo2_studymaxnov0_methylation_x1.csv',header=T,na.strings=c("NA","#N/A","N/A"),stringsAsFactors=F)
+
+
+###############################################################################################
+######################## ANALYSIS OF ALL SUBJECTS ############################################
+###############################################################################################
+
+###################### mixed model analysis in all subjects
+covariates_ordered_subset <- subset(covariates_ordered, visit %in% c(2 ,3))# 
+dat_subset <- dat[, names(dat) %in% covariates_ordered_subset$methylome_id_fixed]
+covs <- subset(covariates_ordered_subset, select=c(age_v0, CD8T,CD4T,NK,Bcell,Mono ,PC1_HGDP,PC2_HGDP,PC3_HGDP))
+
+all_partial_mixed_agecellpc <- cpg.assoc(dat_subset, covariates_ordered_subset$PTSDbroad, covariates = covs,  logit.transform = TRUE, chip.id = studyid, subset = NULL, random = FALSE, fdr.cuto = 0.05, large.data = TRUE, fdr.method = "BH", logitperm= FALSE)
+
+write.table(all_partial_mixed_agecellpc$results , 'data_analysis/RESULTS/all_mixed_uncond_PSTDbroad_agecellpc.mwas',row.names=F,quote=F,sep="\t")
+
+png('data_analysis/RESULTS/all_mixed_uncond_PSTDbroad_agecellpc.png')
+plot(all_partial_mixed_agecellpc)
+dev.off()
+
