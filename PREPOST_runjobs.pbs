@@ -1,0 +1,6 @@
+#Helper job script for pre to post deployment EWAS
+ cd /home/genetics/Desktop/new_methylation
+ 
+ echo "Running job $PBS_ARRAYID"
+ Rscript PREPOST_MWAS.rscript $PBS_ARRAYID
+
