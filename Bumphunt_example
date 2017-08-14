@@ -1,0 +1,136 @@
+#Bump hunting analysis using minfi
+library(minfi)
+#library(doParallel)
+#registerDoParallel(cores = 4)
+library(superpc)
+
+#####################################################################################################
+################################## Read in methylation values #######################################
+#####################################################################################################
+
+#get number of rows in file (reads file faster)
+nr <- as.numeric(system('wc -l cleaned_v3a.methylation | awk \'{print $1}\' ',intern=T))
+
+#get list of numeric column classes (reads file faster)
+dat_temp <- read.table("cleaned_v3a.methylation", header=T,nrows=50)
+classes_to_use <- sapply(dat_temp , class)
+
+#read file
+dat0 <- read.table("cleaned_v3a.methylation", header=T,nrows=nr,colClasses=classes_to_use)
+
+
+############# load in the other stuff like cross hybridizing probes or whatever, to be deleted #########
+snp_probes <- read.table('PCA/cpgs_within_10bp_of_SNP.table', header=F,stringsAsFactors=F)
+names(snp_probes)[1] <- "CpG"
+
+cross_hybridizing <- read.table('PCA/cpg-non-specific-probes-Illumina450k.txt',header=T,stringsAsFactors=F)
+names(cross_hybridizing)[1] <- "CpG"
+
+badprobes <- c(cross_hybridizing$CpG)
+
+dat <- dat0[-which(row.names(dat0) %in% badprobes),]
+
+#####################################################################################################
+################################## Read in Illumina manifest 		#######################################
+#####################################################################################################
+
+#we need to specify chr and pos of each of these probes.
+
+#have to read in the manifest to get the position info to make a GRanges object
+positions <- read.csv('misc/humanmethylation450_15017482_v1-2.csv', header=T,skip=7,stringsAsFactors=F,nrows=486436)
+
+#filter to only the probes that we're using
+positions_use <- positions[which(positions$IlmnID %in% row.names(dat)),]
+
+#order the positions data to the actual data frame
+sample_ordering <- data.frame(cbind(row.names(dat) , 1:length(row.names(dat))), stringsAsFactors=F)
+names(sample_ordering) <- c("IlmnID", "ordering")
+#for some reason the ordering is a string
+sample_ordering$ordering <- as.numeric(sample_ordering$ordering)
+
+probe_order <- merge(sample_ordering, positions_use,by="IlmnID")
+#sort the covariates by the sample ordering
+probe_order2 <- probe_order[order(probe_order$ordering),]
+
+dim(dat)[1] == dim(probe_order2)[1] # must be true
+
+
+#####################################################################################################
+################################## Read in covariates  #######################################
+#####################################################################################################
+
+
+#make a dataframe of subject names that goes in the order they appear in the file
+dat_order <- as.data.frame(names(dat))
+
+#name the subjects the same as found in the matching column in the batch file
+names(dat_order) <- c('methylome_id_fixed')
+
+#establish a note of what the ordering is
+dat_order$order <- c(1:(dim(dat)[2]))
+
+batch <- read.csv("data_analysis/demo2_wholedata_methylation_x3d.csv", header=T,na.strings=c("NA","#N/A","N/A"))
+
+#merge batch data with subject name order data
+covariates_ordered0 <- merge(batch,dat_order,by='methylome_id_fixed')
+
+
+#sort the data by order so the phenotype now lines up
+covariates_ordered <- covariates_ordered0[order(covariates_ordered0$order),]
+
+#read in studymax covariate data, to get the studymax ids (if doing studymax)
+covars_studymax <- read.csv('data_analysis/demo2_studymaxnov0_methylation_x1.csv',header=T,na.strings=c("NA","#N/A","N/A"),stringsAsFactors=F)
+
+##############################################
+########### bump hunting  ###############
+##############################################
+
+#have to filter to relevant data and impute missing values.
+covariates_ordered_subset <- subset(covariates_ordered, visit == 0)
+dat_subset0 <- dat[, names(dat) %in% covariates_ordered_subset$methylome_id_fixed]
+
+impute_median <- function(x)
+{
+	med <- median(x,na.rm=T)
+	x[is.na(x)] <- med
+	return(x)
+}
+
+dat_subset <- t(apply(dat_subset0, 1, impute_median))
+
+dat_subset <- logit2(dat_subset)
+
+#dump the intermediate data (RAM issues)
+rm(dat)
+rm(dat_subset0)
+rm(dat0)
+
+#Make clusters
+clusters500 <- clusterMaker(chr=probe_order$CHR, pos=probe_order$MAPINFO, assumeSorted = FALSE, maxGap = 500)
+
+
+#do bumphuting (settings are as they are as they are in the Ladd Acosta paper, except smoothing is turned off)
+v0_bumphunting <- bumphunterEngine(mat= as.matrix(dat_subset), 
+			design = model.matrix(~ PTSDbroad + age_v0+ CAPStots_v0+ CD8T+CD4T+NK+Bcell+Mono +PC1_HGDP+PC2_HGDP+PC3_HGDP, covariates_ordered_subset), 
+			chr=probe_order2$CHR, pos=probe_order2$MAPINFO, coef=2, cluster=clusters500,pickCutoff=TRUE,pickCutoffQ = .975, B=500)
+
+write.table(v0_bumphunting2$table, 'data_analysis/RESULTS/all_v0_studymax_uncond_PTSDbroad_agecellpccapsv0_q975_rep500_cluster500.bumphunt',row.names=F,quote=F)
+
+###Test code (unrun, problems with it)
+#smoothing fils: with loess it says 
+#Error in { : task 1 failed - "newsplit: out of vertex space", 
+#with medians it says 
+#Error in names(revOrder) <- seq_along(ret$idx) :
+#  attempt to set an attribute on NULL
+
+v3_bumphunting2smooth <- bumphunterEngine(mat= as.matrix(dat_subset), 
+			design = model.matrix(~ PTSDbroad, covariates_ordered_subset), 
+			chr=probe_order2$CHR, pos=probe_order2$MAPINFO, coef=2, smooth=TRUE,smoothFunction=runmedByCluster, cluster=clusters500,pickCutoff=TRUE,pickCutoffQ = .975, B=250)
+
+
+
+v3_bumphuntingq99 <- bumphunterEngine(mat= as.matrix(dat_subset), 
+			design = model.matrix(~ PTSDbroad, covariates_ordered_subset), 
+			chr=probe_order2$CHR, pos=probe_order2$MAPINFO, coef=2, cluster=clusters500,pickCutoff=TRUE,pickCutoffQ = .995, B=100)
+
+
