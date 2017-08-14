@@ -1,0 +1,151 @@
+args <- commandArgs(trailingOnly = TRUE)
+jobnum <- args[1]
+
+library(survival)
+library(sandwich)
+library(lmtest)
+library(data.table)
+
+source("data_analysis/lm_visit_ols_robust_nopheno_v3.R.txt")
+logit2 <- function(x) { log2(x) - log2(1-x) }
+
+######## #read in all covariate data ################
+
+covars <- read.csv('data_analysis/demo2_wholedata_methylation_x3j.csv',header=T,na.strings=c("NA","#N/A","N/A"),stringsAsFactors=F)
+
+#read in studymax covariate data, to get the studymax ids
+covars_studymax <- read.csv('data_analysis/demo2_studymaxnov0_methylation_x1.csv',header=T,na.strings=c("NA","#N/A","N/A"),stringsAsFactors=F)
+
+
+######### Read sample data for fast parsing###########
+analysis_file <- "cleaned_v3a"
+
+#pick job 1-8 for the chunk to be run
+chunkgroup <- as.numeric(jobnum)
+chunkset <- list(c(1:25),c(26:50),c(51:75),c(76:100),c(101:125),c(126:150),c(151:175),c(176:194))
+
+
+
+chunknum=chunkset[[chunkgroup]][1]
+
+file=paste('qced_blocks/', analysis_file, '_chunk', chunknum,'.methylation',sep='')
+
+#get list of numeric column classes (reads files faster)
+dat_temp <- read.table(file, header=T,nrows=50,stringsAsFactors=F)
+classes_to_use <- sapply(dat_temp , class)
+
+#get number of rows for largest file
+nr <- as.numeric(system(paste('wc -l qced_blocks/', analysis_file, '_chunk1.methylation | awk \'{print $1}\' ', sep=''),intern=T))
+
+
+########## Read data in loop
+#to split by four cores, do e.g.
+#right now its set to run on whatever chunkset
+#to junst do everything, do 1:194
+ print("Looping into chunks")
+for(chunknum in chunkset[[chunkgroup]])
+{
+  
+	file=paste('qced_blocks/', analysis_file, '_chunk', chunknum,'.methylation',sep='')
+
+	#read file and transpose
+	dat <- as.data.frame(t(read.table(file, header=T,colClasses=classes_to_use,nrows=nr)))
+
+	# Changing beta values of 0 to 0.0001
+	if(min(dat, na.rm=T)==0){
+ 	 dat[which(dat==0)]<-0.0001
+	}
+
+	# Changing beta values of 1 to 0.9999
+	if(max(dat, na.rm=T)==1){
+  	dat[which(dat==1)]<-0.9999
+	}
+	dat <- as.data.frame(dat)
+
+	########is data already logit transformed?#########
+	#if you don't want logit anyway, set to 1
+	is_logit=0
+	if(is_logit==0)
+	{	
+		dat <- logit2(dat)
+	}
+
+	#make a list of sites to test
+	methylation_sites <- names(dat)
+
+	#now add in the id as a variable instead of just a row name
+	dat$methylome_id_fixed <- as.character(row.names(dat))
+
+	#merge the methylation data to the covariate data
+	dat_use <- merge(dat, covars, by="methylome_id_fixed",all=TRUE)
+
+	###### USER MODIFIED SECTIONS  ###########
+
+	GWASgroup <- "all"
+	timeset <- "studymax"
+	conditional <- "condv0"
+	phenotypename <- "PTSDbroad"
+	covar_extension <- "_agecelldrri_HC3_aug8_2017_"
+	controlled <- FALSE
+	noFC <- ""
+	if(controlled==TRUE)
+	{
+		noFC <- "_noFC"
+	}
+	ancestrycovs <- "+ PC1_HGDP + PC2_HGDP + PC3_HGDP"
+
+	if(GWASgroup == "EA")
+	{
+		dat_use <- subset(dat_use, GWAS_ancestry_class == 1)
+		ancestrycovs <- "+ within_PC1 + within_PC2 + within_PC3"
+	}
+
+	if(timeset == "3mo")
+	{
+		vis <- 2
+	}
+	if(timeset == "6mo")
+	{
+		vis <- 3
+	}
+
+	
+	#name output files
+	outfilename 	 <- paste('data_analysis/r_assoc/', GWASgroup,'_',timeset,'_', conditional, '_', phenotypename, noFC, covar_extension, chunknum,'.model',sep='')
+	outerrfilename <- paste('data_analysis/r_assoc/', GWASgroup,'_',timeset,'_', conditional, '_', phenotypename, noFC, covar_extension, chunknum,'.err'  ,sep='')
+
+	#select the HGDP if using ALL subjects
+
+	#PC1_HGDP + PC2_HGDP + PC3_HGDP
+	#within_PC1 + within_PC2 + within_PC3
+	#CD8T+CD4T+NK+Bcell+Mono+ 
+
+
+	########### ANALYSIS CONDITIONED ON V0 ###################
+	#Must add V0 methylation values to the long dataframe
+	dat_use_methv0 <- subset(dat_use, visit == 0)
+	dat_use_methv0 <- dat_use_methv0[,c("studyid", "CAPStots_v0","DRRI_composite_i","CD8T","CD4T","NK","Bcell","Mono", methylation_sites)]
+	dat_use_withv0 <- merge(dat_use,dat_use_methv0,by="studyid",all.x=TRUE,suffixes=c("","_V0"))
+	#take the proper post deployment visit in the dataframe
+
+	if(timeset != "studymax")
+	{
+		dat_use_withv0 <- subset(dat_use_withv0, visit == vis & !(id_visit %in% c("4817_3", "4737_2")))
+	}
+
+
+	if(timeset == "studymax")
+	{
+		dat_use_withv0 <- subset(dat_use_withv0, id_visit %in% covars_studymax$id_visit & !(id_visit %in% c("4817_3", "4737_2")))
+	}
+
+	#remove false controls for 3 or 6 mo analysis analysis
+	if(controlled== TRUE)
+	{
+		dat_use_withv0  <- subset(dat_use_withv0, (PTSDbroad == 1 | PTSDbroad_highest == 0) & !(id_visit %in% c("4817_3", "4737_2")))
+	}
+ 	#
+	sapply(methylation_sites, lm_v2_ols, df=dat_use_withv0, phenotype=phenotypename, covars=paste(phenotypename,'+ age_v0 + DRRI_composite_i + CD8T+CD4T+NK+Bcell+Mono' ), 
+		output=outfilename, err_out=outerrfilename)
+
+}
